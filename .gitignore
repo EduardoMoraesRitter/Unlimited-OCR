@@ -9,6 +9,17 @@ venv/
 env/
 ENV/
 
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+secrets*.json
+
 # Build and packaging
 build/
 dist/
@@ -29,6 +40,14 @@ htmlcov/
 outputs/
 log/
 *.log
+*.raw.txt
+results/
+checkpoints/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+pytorch_model*.bin
 
 # OS and editor files
 .DS_Store

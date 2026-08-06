@@ -1,0 +1,19 @@
+<|det|>title [55, 50, 724, 104]<|/det|>RELATÓRIO DE TESTE — AGOSTO 2026
+<|det|>text [55, 126, 541, 160]<|/det|>Empresa: Exemplo Tecnologia Ltda.
+<|det|>text [55, 164, 541, 198]<|/det|>Local: São Paulo — SP
+<|det|>text [55, 202, 541, 236]<|/det|>Período: 01/08/2026 a 31/08/2026
+<|det|>sub_title [55, 270, 310, 312]<|/det|>Resumo executivo
+<|det|>text [55, 320, 889, 360]<|/det|>A operação manteve 99,8% de disponibilidade, sem perda de informação.
+<|det|>table [53, 374, 889, 681]<|/det|><table>
+  <thead>
+    <tr><th>Descrição</th><th>Qtd.</th><th>Valor unitário</th><th>Total</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Notebook</td><td>2</td><td>R$ 8.450,90</td><td>R$ 16.901,80</td></tr>
+    <tr><td>Monitor 27 polegadas</td><td>4</td><td>R$ 1.899,00</td><td>R$ 7.596,00</td></tr>
+    <tr><td>Licença anual</td><td>10</td><td>R$ 420,00</td><td>R$ 4.200,00</td></tr>
+  </tbody>
+</table>
+<|det|>text [55, 710, 889, 754]<|/det|>Total geral: R$ 28.697,80
+<|det|>text [55, 786, 889, 840]<|/det|>Observação: valores sujeitos à validação fiscal e à aprovação da diretoria.
+<|det|>footer [55, 936, 889, 970]<|/det|>Documento de demonstração • Página 1 de 1

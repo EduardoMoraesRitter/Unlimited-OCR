@@ -33,6 +33,40 @@
     <img src="assets/Unlimited-OCR.png" width="1000" alt="Unlimited OCR overview" />
 </p>
 
+> [!NOTE]
+> This community fork extends Baidu's
+> [Unlimited-OCR](https://github.com/baidu/Unlimited-OCR) with deterministic
+> JSON export, production-oriented PDF examples, and offline validation. It is
+> not an official Baidu release.
+
+## What this fork adds
+
+- Deterministic conversion of native OCR grounding markers to auditable JSON.
+- Page, layout-block, HTML-table, normalized-coordinate, pixel-coordinate, and
+  multi-region bounding-box support.
+- `infer.py --json` integration for SGLang image and PDF batches while retaining
+  the original Markdown response.
+- A sequential 300-DPI workflow for difficult PDFs with bounded GPU use,
+  suspicious-output detection, guarded `base` to `gundam` retries, raw output
+  per page, and aggregate JSON.
+- Runnable examples for offline conversion, single-image Transformers inference,
+  and difficult PDFs.
+- Offline unit tests covering parsing, safety, temporary-file cleanup, output
+  collisions, retry detection, and JSON-export failures.
+- Safer defaults for public development: generated OCR, model weights, local
+  secrets, credentials, caches, and logs are excluded from Git.
+
+Quick smoke test without downloading the model:
+
+```shell
+python examples/parse_output_to_json.py
+python -m unittest discover -s tests -v
+```
+
+See [the complete change log](CHANGELOG.md), the
+[structured JSON guide](#structured-json-output), and the
+[Portuguese examples guide](examples/README.md).
+
 
 ## Release
 - [2026/07/21] 🤝 Thanks to the [ms-swift community](https://github.com/modelscope/ms-swift) for their support, our model now supports training with [ms-swift](https://github.com/modelscope/ms-swift).
@@ -272,14 +306,14 @@ For batch inference, `infer.py` starts the SGLang server automatically and sends
 ```shell
 # Image directory
 python infer.py \
-    --image_dir ./examples/images \
+    --image_dir /path/to/images \
     --output_dir ./outputs \
     --concurrency 8 \
     --image_mode gundam
 
 # PDF pages
 python infer.py \
-    --pdf ./examples/document.pdf \
+    --pdf ./Unlimited-OCR.pdf \
     --output_dir ./outputs \
     --concurrency 8 \
     --image_mode gundam
@@ -324,6 +358,70 @@ def remove_det(raw: str) -> str:
     text = '\n\n'.join('\n'.join(b) for b in blocks).strip()
     return text
 ```
+
+## Structured JSON output
+
+The model is optimized for grounded OCR text, not for generating a JSON schema
+directly from a prompt. Its raw response contains layout markers, normalized
+bounding boxes, Markdown, and HTML tables. `unlimited_ocr_json.py` converts that
+response to deterministic JSON without asking the model to rewrite its own
+output.
+
+The converter uses only the Python standard library and can be tested without a
+GPU or model download:
+
+```shell
+python unlimited_ocr_json.py examples/raw_output.txt \
+    --output outputs/example.json \
+    --source example.png \
+    --image-size 1400x1000
+```
+
+Use `--json` with the SGLang batch runner to create a structured `.json` file
+next to every raw `.md` result:
+
+```shell
+python infer.py \
+    --pdf ./Unlimited-OCR.pdf \
+    --output_dir ./outputs \
+    --concurrency 1 \
+    --image_mode base \
+    --json
+```
+
+Each JSON document contains pages, ordered layout blocks, source coordinates,
+pixel coordinates when the image size is known, parsed HTML table rows, the raw
+model output, and validation warnings. Keeping the raw response makes it
+possible to audit or reprocess a result later. When one block has several
+regions, `bboxes` preserves every box and `bbox` contains their outer envelope.
+
+### Examples
+
+| Example | Purpose |
+| --- | --- |
+| [`examples/parse_output_to_json.py`](examples/parse_output_to_json.py) | Convert a saved raw response without loading the model. |
+| [`examples/transformers_image_to_json.py`](examples/transformers_image_to_json.py) | Run one image with Transformers and preserve layout in JSON. |
+| [`examples/difficult_pdf_to_json.py`](examples/difficult_pdf_to_json.py) | Render and process a difficult PDF page by page with guarded retries. |
+
+See [`examples/README.md`](examples/README.md) for complete commands.
+
+### Difficult PDFs and low-VRAM GPUs
+
+For scanned, dense, rotated, or table-heavy PDFs:
+
+1. Render pages at 300 DPI and process them independently so one bad page does
+   not invalidate the whole document.
+2. Start with `base` mode. Retry only suspicious pages with `gundam`, which can
+   recover smaller text but uses more visual tokens and GPU memory.
+3. Treat 8 GB GPUs as marginal: start with `base`, use `--concurrency 1`, and
+   keep a bounded generation length. Even then, some pages may not fit. Increase
+   concurrency only after measuring free memory.
+4. Inspect the JSON warnings for empty output, invalid boxes, or suspicious
+   repetition, and retain each page's raw output for troubleshooting.
+5. Run sensitive documents locally instead of uploading them to a hosted demo.
+
+The page-by-page PDF example implements this conservative workflow and still
+allows `base`, `gundam`, or automatic retry mode.
 
 ## Visualization
 

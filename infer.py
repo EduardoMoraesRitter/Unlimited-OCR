@@ -18,6 +18,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
+from unlimited_ocr_json import parse_ocr_output, write_json
+
 SERVED_MODEL_NAME = "Unlimited-OCR"
 SERVER_URL = "http://127.0.0.1:10000"
 HOST = "0.0.0.0"
@@ -47,18 +49,24 @@ def get_ngram_processor_str():
     return NO_REPEAT_NGRAM_PROCESSOR_STR
 
 
-def pdf_to_images(pdf_path: str, dpi: int = 300) -> list[str]:
+def pdf_to_images(
+    pdf_path: str,
+    output_dir: str,
+    dpi: int = 300,
+) -> list[str]:
     import fitz
 
-    doc = fitz.open(pdf_path)
-    tmp_dir = tempfile.mkdtemp(prefix="pdf_ocr_")
+    os.makedirs(output_dir, exist_ok=True)
     image_paths = []
     mat = fitz.Matrix(dpi / 72, dpi / 72)
-    for i, page in enumerate(doc):
-        out_path = os.path.join(tmp_dir, f"page_{i + 1:04d}.png")
-        page.get_pixmap(matrix=mat).save(out_path)
-        image_paths.append(out_path)
-    doc.close()
+    with fitz.open(pdf_path) as document:
+        for i, page in enumerate(document):
+            out_path = os.path.join(
+                output_dir,
+                f"page_{i + 1:04d}.png",
+            )
+            page.get_pixmap(matrix=mat).save(out_path)
+            image_paths.append(out_path)
     return image_paths
 
 
@@ -152,6 +160,9 @@ def collect_stream_silent(resp, output_file: str | None) -> dict:
     chunks = []
     token_count = 0
     first_token_time = None
+    if output_file:
+        output_dir = os.path.dirname(os.path.abspath(output_file))
+        os.makedirs(output_dir, exist_ok=True)
     f = open(output_file, "w", encoding="utf-8") if output_file else None
     try:
         for raw_line in resp.iter_lines():
@@ -185,7 +196,47 @@ def collect_stream_silent(resp, output_file: str | None) -> dict:
     return {"tokens": token_count, "decode_time": decode_time, "text": "".join(chunks)}
 
 
-def infer_one(image_path: str, output_file: str | None, args, idx: int) -> dict:
+def attach_json_result(
+    result: dict,
+    image_path: str,
+    output_file: str,
+    source: str,
+    idx: int,
+    name: str,
+) -> None:
+    """Add a JSON companion without ever retrying successful inference."""
+    image_sizes = None
+    try:
+        from PIL import Image
+
+        with Image.open(image_path) as image:
+            image_sizes = [image.size]
+    except Exception:
+        # Pixel coordinates are optional; normalized boxes remain available.
+        pass
+
+    json_file = os.path.splitext(output_file)[0] + ".json"
+    try:
+        document = parse_ocr_output(
+            result["text"],
+            source=source,
+            image_sizes=image_sizes,
+        )
+        write_json(document, json_file)
+        result["json_file"] = json_file
+    except Exception as exc:
+        # Export failures must not repeat an expensive, successful OCR request.
+        result["json_error"] = str(exc)
+        print(f"  [{idx}] {name}: JSON export failed ({exc})")
+
+
+def infer_one(
+    image_path: str,
+    output_file: str | None,
+    source: str,
+    args,
+    idx: int,
+) -> dict:
     payload = {
         "model": SERVED_MODEL_NAME,
         "messages": [{"role": "user", "content": build_content(image_path)}],
@@ -216,6 +267,15 @@ def infer_one(image_path: str, output_file: str | None, args, idx: int) -> dict:
                 continue
             resp.raise_for_status()
             result = collect_stream_silent(resp, output_file)
+            if getattr(args, "json", False) and output_file:
+                attach_json_result(
+                    result,
+                    image_path,
+                    output_file,
+                    source,
+                    idx,
+                    name,
+                )
             print(f"  [{idx}] {name}: {result['tokens']} tokens, {result['decode_time']:.1f}s")
             return result
         except Exception as e:
@@ -237,16 +297,26 @@ def collect_dataset_images(image_dir: str) -> list[str]:
     return sorted(image_files, key=lambda f: os.path.getsize(f), reverse=True)
 
 
-def build_jobs(args) -> list[tuple[str, str | None]]:
+def build_jobs(
+    args,
+    pdf_temp_dir: str | None = None,
+) -> list[tuple[str, str | None, str]]:
     if args.pdf:
-        image_files = pdf_to_images(args.pdf, dpi=PDF_DPI)
+        if not pdf_temp_dir:
+            raise ValueError("pdf_temp_dir is required for PDF input")
+        image_files = pdf_to_images(
+            args.pdf,
+            pdf_temp_dir,
+            dpi=PDF_DPI,
+        )
         prefix = os.path.splitext(os.path.basename(args.pdf))[0]
         jobs = []
         for i, image_path in enumerate(image_files):
             output_file = None
             if args.output_dir:
                 output_file = os.path.join(args.output_dir, f"{prefix}_page_{i + 1:04d}.md")
-            jobs.append((image_path, output_file))
+            source = f"{os.path.abspath(args.pdf)}#page={i + 1}"
+            jobs.append((image_path, output_file, source))
         return jobs
 
     if not args.image_dir:
@@ -258,14 +328,14 @@ def build_jobs(args) -> list[tuple[str, str | None]]:
         output_file = None
         if args.output_dir:
             rel = os.path.relpath(image_path, args.image_dir)
-            stem = os.path.splitext(rel)[0].replace(os.sep, "__")
-            output_file = os.path.join(args.output_dir, f"{stem}.md")
-        jobs.append((image_path, output_file))
+            output_file = os.path.join(args.output_dir, f"{rel}.md")
+        jobs.append((image_path, output_file, os.path.abspath(image_path)))
     return jobs
 
 
-def run(args):
-    jobs = build_jobs(args)
+def run_jobs(args, jobs: list[tuple[str, str | None, str]]) -> int:
+    if not jobs:
+        raise ValueError("No input pages or supported images were found")
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
 
@@ -276,8 +346,15 @@ def run(args):
     results = []
     with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
         futures = {
-            executor.submit(infer_one, image_path, output_file, args, i + 1): image_path
-            for i, (image_path, output_file) in enumerate(jobs)
+            executor.submit(
+                infer_one,
+                image_path,
+                output_file,
+                source,
+                args,
+                i + 1,
+            ): image_path
+            for i, (image_path, output_file, source) in enumerate(jobs)
         }
         for future in as_completed(futures):
             results.append(future.result())
@@ -285,6 +362,7 @@ def run(args):
     wall_time = time.time() - wall_start
     total_tokens = sum(r["tokens"] for r in results)
     successful = sum(1 for r in results if r["tokens"] > 0)
+    json_errors = sum(1 for r in results if r.get("json_error"))
     print(f"\n{'=' * 60}")
     print("Concurrent Results:")
     print(f"  Requests: {successful}/{len(jobs)}")
@@ -297,7 +375,22 @@ def run(args):
         avg_tokens = total_tokens / successful
         print(f"  Avg tokens/request: {avg_tokens:.0f}")
         print(f"  Avg decode_time/request: {avg_decode:.2f}s")
+    if json_errors:
+        print(f"  JSON export failures: {json_errors}")
     print(f"{'=' * 60}")
+    return 0 if successful == len(jobs) and not json_errors else 1
+
+
+def run(args) -> int:
+    if getattr(args, "json", False) and not args.output_dir:
+        raise ValueError("--json requires --output_dir")
+    if args.pdf:
+        with tempfile.TemporaryDirectory(prefix="pdf_ocr_") as temp_dir:
+            return run_jobs(
+                args,
+                build_jobs(args, pdf_temp_dir=temp_dir),
+            )
+    return run_jobs(args, build_jobs(args))
 
 
 def parse_args():
@@ -313,6 +406,11 @@ def parse_args():
     parser.add_argument("--model_dir", default="baidu/Unlimited-OCR")
     parser.add_argument("--image_mode", choices=("gundam", "base"), default="gundam")
     parser.add_argument("--server_log", default="./log/sglang_server.log")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Write a structured .json file next to each raw .md output",
+    )
     return parser.parse_args()
 
 
@@ -320,10 +418,10 @@ def main():
     args = parse_args()
     server_process = start_server(args)
     try:
-        run(args)
+        return run(args)
     finally:
         stop_server(server_process)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
