@@ -57,8 +57,9 @@
   per page, and aggregate JSON.
 - Runnable examples for offline conversion, single-image Transformers inference,
   and difficult PDFs.
-- A small localhost-only Gradio interface for image/PDF upload, live CUDA status,
-  raw model output, structured JSON, and explicit GPU-memory release.
+- A small localhost-only Gradio interface for image/PDF upload, rendered PDF-page
+  preview before inference, live CUDA status, raw model output, structured JSON,
+  and explicit GPU-memory release.
 - Offline unit tests covering parsing, safety, temporary-file cleanup, output
   collisions, retry detection, and JSON-export failures.
 - GitHub Actions CI that runs the offline suite for every push and pull request,
@@ -70,6 +71,7 @@ Quick smoke test without downloading or running the OCR model:
 
 ```shell
 python examples/parse_output_to_json.py
+python -m pip install requests Pillow==12.1.1 pymupdf==1.27.2.2
 python -m unittest discover -s tests -v
 ```
 
@@ -82,7 +84,11 @@ python examples/gradio_cuda_app.py
 ```
 
 Then open <http://127.0.0.1:7860>. The server binds only to localhost and does
-not create a public Gradio share link.
+not create a public Gradio share link. Images are shown directly; for PDFs, the
+selected page is rendered locally and displayed before OCR so it can be checked
+visually. The chosen DPI and full OCR dimensions appear in the preview metadata.
+Browser rendering is bounded to 120 DPI, 1,600 pixels per side, and 3 million
+pixels. The OCR model is loaded only on the first run.
 
 See [the complete change log](CHANGELOG.md), the
 [structured JSON guide](#structured-json-output), and the
@@ -96,11 +102,11 @@ evidence for the second layer only; it is not an OCR-accuracy benchmark.
 
 | Component | Where it runs | CUDA required? | Current validation status |
 | --- | --- | --- | --- |
-| JSON parser and validator | Local Python | No | 18 offline tests cover markers, pages, tables, coordinates, warnings, safe parsing, file handling, and runner failures. |
-| PDF rendering and page orchestration | Local Python | No for rendering; yes for the OCR step | Rendering, retry selection, cleanup, and error paths are covered offline with fixtures and mocks. |
+| JSON parser, validator, and local helpers | Local Python | No | 24 offline tests cover markers, pages, tables, coordinates, warnings, safe parsing, file handling, runner failures, preview controls, and image/PDF preview rendering. |
+| PDF rendering and page orchestration | Local Python | No for rendering; yes for the OCR step | Rendering, page selection, DPI/resolution reporting, retry selection, cleanup, and error paths are covered offline with public examples, fixtures, and mocks. |
 | Unlimited-OCR through the official Hugging Face Space | Hugging Face infrastructure | Not on the user's computer; the provider supplies the GPU | Used only for exploratory inference. This is not presented as a reproducible quality benchmark. |
 | Full local Unlimited-OCR inference | Local machine | Yes for the upstream Transformers path used here | Manually smoke-tested on an RTX 4070 Laptop GPU through the local web UI; still excluded from CI and not an accuracy benchmark. |
-| Difficult/low-resolution PDF accuracy | Local or hosted GPU | Yes somewhere during model inference | One dense-form smoke test completed technically but produced repetitive/truncated text. Measured CER/WER results have not yet been published. |
+| Difficult/low-resolution PDF accuracy | Local or hosted GPU | Yes somewhere during model inference | One dense-form stress run completed technically but produced repetitive/truncated text. Measured CER/WER results have not yet been published. |
 
 ### CUDA is an upstream runtime requirement
 
@@ -121,21 +127,33 @@ This fork does not claim a validated CPU fallback for the full model. See
 [`examples/README.md`](examples/README.md) for a CUDA verification command and
 the WSL/Linux setup used by the examples.
 
-### Local CUDA smoke-test evidence
+### Local CUDA evidence: what actually happened
 
-On 2026-08-06, the localhost web UI ran the pinned model revision
-`07dea832e22aefee32ad281d4b80551282e1c168` with PyTorch 2.10.0+cu129 on an
-NVIDIA GeForce RTX 4070 Laptop GPU. In `base` mode with `max_length=4096`, the
-included `assets/baidu.png` example returned `Baidu 百度`, produced valid schema
-1.0 JSON, took 92 seconds, and reported 6,835 MiB peak PyTorch CUDA allocation.
+On 2026-08-06, three manual runs used the pinned model revision
+`07dea832e22aefee32ad281d4b80551282e1c168`, PyTorch 2.10.0+cu129, CUDA 12.9,
+`base` mode, and `max_length=4096` on an NVIDIA GeForce RTX 4070 Laptop GPU.
+These are observed single-run integration results, not vendor claims:
 
-A 200-DPI first page of the official
-[2025 IRS Form 1040](https://www.irs.gov/pub/irs-pdf/f1040.pdf) also completed
-locally in 388 seconds with a 7,039 MiB peak, but its output entered a repeated
-phrase loop and ended with an unclosed table. That run proves the CUDA pipeline
-executes; it does **not** prove acceptable OCR quality on dense forms. The web
-UI shows a review warning when it detects this kind of malformed or repetitive
-response.
+| Input | Test role | Elapsed | Peak CUDA memory | Observed output | Interpretation |
+| --- | --- | ---: | ---: | --- | --- |
+| [`assets/baidu.png`](assets/baidu.png), 440 × 133 | Minimal logo smoke test through the web UI | 92 s | 6,835 MiB reported by PyTorch | `Baidu 百度`; valid schema 1.0 JSON with one `title` block and no warnings | The UI, model load from local cache, CUDA inference, parser, and JSON download path worked end to end. It is too simple to establish general OCR accuracy. |
+| [`assets/Unlimited-OCR.png`](assets/Unlimited-OCR.png), 925 × 283 | Diagram stress observation through the image CLI | 218 s | 7,035 MiB observed by `nvidia-smi` | One full-page `image` block with empty content; JSON emitted `empty_block` | The process exited normally, but no useful diagram text was recovered. Technical completion is not semantic success. |
+| Page 1 of the official [2025 IRS Form 1040](https://www.irs.gov/pub/irs-pdf/f1040.pdf), rendered at 200 DPI to 1700 × 2200 | Dense-form stress test through the image CLI | 388 s | 7,039 MiB observed by `nvidia-smi`; sampled utilization reached 98% | 13,143 characters, 16 grounded blocks and valid JSON syntax, but 397 occurrences of `Check if you`, 9 opening tables versus 8 closing tables, and no reach to `adjusted gross income` | CUDA was genuinely active, but generation became repetitive and truncated before the lower form sections. The result is unsuitable without review or a better inference strategy. |
+
+The first run is a **smoke test**: it asks whether all integration layers execute
+and return the expected tiny string. The other two are **stress observations**:
+they expose behavior on a diagram and a dense table-heavy form. None is an OCR
+accuracy benchmark because this repository has not yet published ground-truth
+transcriptions or CER/WER measurements. Timing includes the work performed in
+that run and can vary with cache state, power limits, background GPU use, and
+generation length; do not treat it as a throughput guarantee.
+
+The raw response remains the source of truth. A syntactically valid JSON file
+only proves deterministic conversion; it does not make repetitive, missing, or
+incorrect model text accurate. The UI and difficult-PDF runner flag obvious
+short, malformed, or repetitive output for human review, but those heuristics
+cannot detect every OCR error. Exact reproduction commands and a longer account
+of the results are in [`examples/README.md`](examples/README.md).
 
 
 ## Release
@@ -478,6 +496,7 @@ regions, `bboxes` preserves every box and `bbox` contains their outer envelope.
 | [`examples/parse_output_to_json.py`](examples/parse_output_to_json.py) | Convert a saved raw response without loading the model. |
 | [`examples/transformers_image_to_json.py`](examples/transformers_image_to_json.py) | Run one image with Transformers and preserve layout in JSON. |
 | [`examples/difficult_pdf_to_json.py`](examples/difficult_pdf_to_json.py) | Render and process a difficult PDF page by page with guarded retries. |
+| [`examples/gradio_cuda_app.py`](examples/gradio_cuda_app.py) | Open a minimal local UI with image/PDF preview, CUDA status, raw output, JSON, and explicit model unload. |
 
 See [`examples/README.md`](examples/README.md) for complete commands.
 
@@ -498,6 +517,29 @@ For scanned, dense, rotated, or table-heavy PDFs:
 
 The page-by-page PDF example implements this conservative workflow and still
 allows `base`, `gundam`, or automatic retry mode.
+
+### Privacy and safe public-repository defaults
+
+The local UI binds to `127.0.0.1`, sets `share=False`, and processes the uploaded
+document locally after the model and remote model code have been downloaded.
+It does not create a public Gradio URL. The Hugging Face Space is different:
+files submitted there leave the computer and are processed by a third party.
+
+Local OCR results may contain the entire document text. The image CLI also
+records the resolved source path and embeds the raw model response in JSON;
+those fields can reveal usernames, folder names, client data, or document
+content. Review any artifact before sharing it. This fork's `.gitignore`
+excludes `.env*` (while allowing `.env.example` as a template name), common
+credentials and private keys, model weights, `outputs/`, `tmp/`, logs, caches, and raw OCR
+files. Git ignore rules reduce accidental publication but are not a substitute
+for `git status`, `git diff --cached`, and a secret scan before every public
+push. A secret that was already committed must be rotated and removed from Git
+history; adding it to `.gitignore` afterward is not enough.
+
+The three CUDA observations above are documented as measurements, while their
+generated raw/JSON files remain under ignored local output directories. This
+keeps reproducibility details public without publishing potentially sensitive
+document contents or machine-specific absolute paths.
 
 ## Visualization
 

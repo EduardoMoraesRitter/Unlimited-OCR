@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
@@ -38,15 +39,72 @@ DEFAULT_DPI = 200
 DEFAULT_MAX_LENGTH = 4096
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_IMAGE_PIXELS = 25_000_000
+PREVIEW_DPI = 120
+PREVIEW_MAX_SIDE = 1600
+PREVIEW_MAX_PIXELS = 3_000_000
 APP_CSS = """
-:root { --cuda: #76b900; --ink: #17211a; }
-.gradio-container { max-width: 1080px !important; margin: 0 auto !important; }
-.hero { padding: 20px 4px 6px; }
-.hero h1 { font-family: Bahnschrift, 'Aptos Display', sans-serif; letter-spacing: -0.04em; }
-.hero p { max-width: 720px; color: #58645c; }
-.cuda-card { border-left: 4px solid var(--cuda) !important; }
-.run-button { background: var(--cuda) !important; border-color: var(--cuda) !important; color: #10170d !important; font-weight: 750 !important; }
-.result-code textarea, .result-code pre { font-family: 'Cascadia Code', Consolas, monospace !important; }
+:root { --cuda: #76b900; --cuda-dark: #263d0c; }
+.gradio-container {
+  max-width: 1180px !important;
+  margin: 0 auto !important;
+  font-family: Aptos, 'Segoe UI Variable', 'Trebuchet MS', sans-serif !important;
+}
+.hero { padding: 24px 4px 8px; }
+.hero .eyebrow {
+  color: var(--cuda);
+  font-family: Bahnschrift, 'Arial Narrow', sans-serif;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.hero h1 {
+  margin: 7px 0 5px;
+  font-family: Bahnschrift, 'Arial Narrow', sans-serif;
+  font-size: clamp(2.2rem, 5vw, 4rem);
+  font-weight: 650;
+  letter-spacing: -0.055em;
+  line-height: 0.95;
+}
+.hero p { max-width: 700px; margin: 0; opacity: 0.72; }
+.cuda-card {
+  margin: 8px 0 16px;
+  padding: 4px 0 10px !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+.cuda-card > div { border: 0 !important; background: transparent !important; }
+.cuda-card p { margin: 0 !important; }
+.work-panel {
+  padding: 16px !important;
+  border: 1px solid var(--border-color-primary) !important;
+  border-radius: 18px !important;
+  background: var(--block-background-fill) !important;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.08);
+}
+.panel-title h3 {
+  margin: 0 0 10px;
+  font-family: Bahnschrift, 'Arial Narrow', sans-serif;
+  letter-spacing: -0.02em;
+}
+.preview-frame {
+  min-height: 360px;
+  border-radius: 14px !important;
+  overflow: hidden;
+}
+.preview-frame img { object-fit: contain !important; }
+.preview-note { min-height: 28px; font-size: 0.88rem; opacity: 0.76; }
+.run-button {
+  background: var(--cuda) !important;
+  border-color: var(--cuda) !important;
+  color: #10170d !important;
+  font-weight: 750 !important;
+}
+.run-button:hover { filter: brightness(1.08); transform: translateY(-1px); }
+.result-code textarea, .result-code pre {
+  font-family: 'Cascadia Code', 'Cascadia Mono', Consolas, monospace !important;
+}
 footer { display: none !important; }
 """
 
@@ -54,6 +112,16 @@ _MODEL: Any | None = None
 _TOKENIZER: Any | None = None
 _TORCH: Any | None = None
 _INFERENCE_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class PreviewPayload:
+    """Rendered preview plus page metadata needed by the Gradio controls."""
+
+    image: Any
+    note: str
+    page_count: int
+    is_pdf: bool
 
 
 def _trim_linux_memory() -> None:
@@ -117,7 +185,7 @@ def _load_model() -> tuple[Any, Any, Any]:
 
 def _upload_path(value: Any) -> Path:
     """Normalize Gradio's filepath value across recent Gradio versions."""
-    if isinstance(value, str):
+    if isinstance(value, (str, os.PathLike)):
         path = Path(value)
     elif isinstance(value, dict) and value.get("path"):
         path = Path(value["path"])
@@ -137,6 +205,166 @@ def _safe_stem(path: Path) -> str:
     return stem[:60] or "documento"
 
 
+def _integer_control(value: Any, label: str) -> int:
+    """Return an exact finite integer from a UI/API control value."""
+    if isinstance(value, bool):
+        raise ValueError(f"{label} precisa ser um número inteiro.")
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError) as error:
+        raise ValueError(f"{label} precisa ser um número inteiro.") from error
+    if not math.isfinite(number) or not number.is_integer():
+        raise ValueError(f"{label} precisa ser um número inteiro.")
+    return int(number)
+
+
+def _page_and_dpi(page_number: float, dpi: float) -> tuple[int, int]:
+    """Validate the page-preview controls independently from Gradio."""
+    page = _integer_control(page_number, "A página")
+    render_dpi = _integer_control(dpi, "O DPI")
+    if page < 1:
+        raise ValueError("A página deve ser 1 ou maior.")
+    if render_dpi not in {150, 200, 250, 300}:
+        raise ValueError("Use 150, 200, 250 ou 300 DPI.")
+    return page, render_dpi
+
+
+def _check_pixel_limit(width: int, height: int) -> None:
+    """Reject invalid or unexpectedly large raster dimensions."""
+    if width <= 0 or height <= 0:
+        raise ValueError("O documento possui dimensões inválidas.")
+    if width * height > MAX_IMAGE_PIXELS:
+        raise ValueError("A imagem excede o limite de 25 milhões de pixels.")
+
+
+def _build_preview(
+    upload_value: Any,
+    page_number: float,
+    dpi: float,
+) -> PreviewPayload:
+    """Render a bounded preview without importing Gradio, Torch, or the model."""
+    upload = _upload_path(upload_value)
+    page, render_dpi = _page_and_dpi(page_number, dpi)
+    extension = upload.suffix.lower()
+    if extension not in {
+        ".pdf",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".bmp",
+    }:
+        raise ValueError("Formato não aceito. Use imagem ou PDF.")
+
+    from PIL import Image, ImageOps
+
+    if extension != ".pdf":
+        with Image.open(upload) as image:
+            width, height = image.size
+            _check_pixel_limit(width, height)
+            preview = ImageOps.exif_transpose(image).convert("RGB")
+        preview.thumbnail(
+            (PREVIEW_MAX_SIDE, PREVIEW_MAX_SIDE),
+            Image.Resampling.LANCZOS,
+        )
+        note = (
+            "👁️ **Prévia pronta** · imagem · "
+            f"original `{width} × {height}` · prévia `{preview.width} × {preview.height}`"
+        )
+        return PreviewPayload(preview, note, 1, False)
+
+    import fitz
+
+    with fitz.open(upload) as document:
+        if document.needs_pass:
+            raise ValueError("PDF protegido por senha não é aceito nesta tela.")
+        if document.page_count == 0:
+            raise ValueError("O PDF não contém páginas.")
+        if page > document.page_count:
+            raise ValueError(
+                f"Escolha uma página entre 1 e {document.page_count}."
+            )
+        pdf_page = document.load_page(page - 1)
+        width_points = float(pdf_page.rect.width)
+        height_points = float(pdf_page.rect.height)
+        if not all(
+            math.isfinite(value) and value > 0
+            for value in (width_points, height_points)
+        ):
+            raise ValueError("A página do PDF possui dimensões inválidas.")
+        ocr_width = math.ceil(width_points * render_dpi / 72)
+        ocr_height = math.ceil(height_points * render_dpi / 72)
+        _check_pixel_limit(ocr_width, ocr_height)
+
+        preview_scale = min(
+            PREVIEW_DPI / 72,
+            PREVIEW_MAX_SIDE / max(width_points, height_points),
+            math.sqrt(PREVIEW_MAX_PIXELS / (width_points * height_points)),
+        )
+        matrix = fitz.Matrix(preview_scale, preview_scale)
+        pixmap = pdf_page.get_pixmap(
+            matrix=matrix,
+            colorspace=fitz.csRGB,
+            alpha=False,
+        )
+        preview = Image.frombytes(
+            "RGB",
+            (pixmap.width, pixmap.height),
+            pixmap.samples,
+        )
+        note = (
+            f"👁️ **Prévia pronta** · PDF · página **{page} de {document.page_count}** · "
+            f"prévia `{preview.width} × {preview.height}` · "
+            f"OCR `{ocr_width} × {ocr_height}` a **{render_dpi} DPI**"
+        )
+        return PreviewPayload(preview, note, document.page_count, True)
+
+
+def preview_document(
+    upload_value: Any,
+    page_number: float,
+    dpi: float,
+) -> tuple[Any | None, str]:
+    """Safe Gradio adapter for page/DPI changes."""
+    if not upload_value:
+        return None, "Selecione uma imagem ou PDF para visualizar."
+    try:
+        payload = _build_preview(upload_value, page_number, dpi)
+        return payload.image, payload.note
+    except Exception as error:
+        return None, f"❌ **Não foi possível gerar a prévia:** {error}"
+
+
+def preview_new_upload(
+    upload_value: Any,
+    dpi: float,
+) -> tuple[Any | None, str, Any]:
+    """Preview page one and update the PDF page control bounds."""
+    import gradio as gr
+
+    if not upload_value:
+        return (
+            None,
+            "Selecione uma imagem ou PDF para visualizar.",
+            gr.update(value=1, minimum=1, maximum=1, interactive=False),
+        )
+    try:
+        payload = _build_preview(upload_value, 1, dpi)
+        page_update = gr.update(
+            value=1,
+            minimum=1,
+            maximum=payload.page_count,
+            interactive=payload.is_pdf,
+        )
+        return payload.image, payload.note, page_update
+    except Exception as error:
+        return (
+            None,
+            f"❌ **Não foi possível gerar a prévia:** {error}",
+            gr.update(value=1, minimum=1, maximum=1, interactive=False),
+        )
+
+
 def _prepare_image(
     upload: Path,
     page_number: int,
@@ -150,6 +378,8 @@ def _prepare_image(
     import fitz
 
     with fitz.open(upload) as document:
+        if document.needs_pass:
+            raise ValueError("PDF protegido por senha não é aceito nesta tela.")
         if document.page_count == 0:
             raise ValueError("O PDF não contém páginas.")
         if page_number < 1 or page_number > document.page_count:
@@ -159,10 +389,7 @@ def _prepare_image(
         page = document.load_page(page_number - 1)
         rendered_width = math.ceil(page.rect.width * dpi / 72)
         rendered_height = math.ceil(page.rect.height * dpi / 72)
-        if rendered_width * rendered_height > MAX_IMAGE_PIXELS:
-            raise ValueError(
-                "A página renderizada excederia o limite de 25 milhões de pixels."
-            )
+        _check_pixel_limit(rendered_width, rendered_height)
         matrix = fitz.Matrix(dpi / 72, dpi / 72)
         image_path = temp_dir / f"page-{page_number:04d}.png"
         page.get_pixmap(matrix=matrix, alpha=False).save(image_path)
@@ -178,19 +405,12 @@ def run_ocr(
     """Run one local OCR request and stream status changes to the UI."""
     try:
         upload = _upload_path(upload_value)
-        page = int(page_number)
-        render_dpi = int(dpi)
-        sequence_limit = int(max_length)
+        page, render_dpi = _page_and_dpi(page_number, dpi)
+        sequence_limit = _integer_control(max_length, "O limite de sequência")
     except (TypeError, ValueError) as error:
         yield cuda_status(), f"❌ **{error}**", "", None, None
         return
 
-    if page < 1:
-        yield cuda_status(), "❌ **A página deve ser 1 ou maior.**", "", None, None
-        return
-    if render_dpi not in {150, 200, 250, 300}:
-        yield cuda_status(), "❌ **Use 150, 200, 250 ou 300 DPI.**", "", None, None
-        return
     if sequence_limit not in {2048, 3072, 4096}:
         yield (
             cuda_status(),
@@ -205,12 +425,21 @@ def run_ocr(
         yield cuda_status(), "❌ **Formato não aceito. Use imagem ou PDF.**", "", None, None
         return
 
+    safe_name = f"{_safe_stem(upload)}{upload.suffix.lower()}"
+    if upload.suffix.lower() == ".pdf":
+        request_description = (
+            f"`{safe_name}` · página **{page}** · **{render_dpi} DPI**"
+        )
+    else:
+        request_description = f"`{safe_name}` · imagem"
+
     with _INFERENCE_LOCK:
         try:
             if _MODEL is None:
                 yield (
                     cuda_status(),
-                    "⏳ **Carregando o Unlimited-OCR na GPU…** Na primeira vez isso pode levar alguns minutos.",
+                    "⏳ **Carregando o Unlimited-OCR na GPU…** Na primeira vez isso pode levar alguns minutos."
+                    f"\n\nEntrada fixada para esta execução: {request_description}.",
                     "",
                     None,
                     None,
@@ -218,7 +447,8 @@ def run_ocr(
             torch, tokenizer, model = _load_model()
             yield (
                 cuda_status(),
-                "🔎 **Modelo carregado. Executando OCR local na GPU…**",
+                "🔎 **Modelo carregado. Executando OCR local na GPU…**"
+                f"\n\nEntrada fixada para esta execução: {request_description}.",
                 "",
                 None,
                 None,
@@ -238,10 +468,7 @@ def run_ocr(
 
                 with Image.open(image_path) as image:
                     image_size = image.size
-                    if image.width * image.height > MAX_IMAGE_PIXELS:
-                        raise ValueError(
-                            "A imagem excede o limite de 25 milhões de pixels."
-                        )
+                    _check_pixel_limit(image.width, image.height)
 
                 previous_sliding_window = getattr(
                     model.config,
@@ -305,6 +532,7 @@ def run_ocr(
             status = (
                 f"{warning}\n\nTempo: **{elapsed:.0f} s** · pico CUDA: "
                 f"**{peak_mib:.0f} MiB** · modo: **base**"
+                f"\n\nEntrada processada: {request_description}."
             )
             yield cuda_status(), status, raw_output, document, str(json_path)
         except RuntimeError as error:
@@ -315,9 +543,21 @@ def run_ocr(
                 )
             else:
                 message = str(error)
-            yield cuda_status(), f"❌ **Falha na execução:** {message}", "", None, None
+            yield (
+                cuda_status(),
+                f"❌ **Falha na execução:** {message}\n\nEntrada: {request_description}.",
+                "",
+                None,
+                None,
+            )
         except Exception as error:
-            yield cuda_status(), f"❌ **Falha na execução:** {error}", "", None, None
+            yield (
+                cuda_status(),
+                f"❌ **Falha na execução:** {error}\n\nEntrada: {request_description}.",
+                "",
+                None,
+                None,
+            )
 
 
 def unload_model() -> tuple[str, str]:
@@ -341,31 +581,60 @@ def build_demo() -> Any:
     with gr.Blocks(title="Unlimited-OCR · CUDA local") as demo:
         gr.Markdown(
             """
-            # Unlimited‑OCR
-            Envie uma imagem ou escolha uma página de PDF. O arquivo fica neste computador e o modelo roda na sua NVIDIA via CUDA.
+            <div class="hero">
+              <span class="eyebrow">Local CUDA document workbench</span>
+              <h1>Unlimited‑OCR</h1>
+              <p>Veja a página antes de processar. O arquivo fica neste computador e o modelo roda na sua NVIDIA.</p>
+            </div>
             """,
-            elem_classes="hero",
         )
         cuda_box = gr.Markdown(cuda_status(), elem_classes="cuda-card")
 
         with gr.Row(equal_height=False):
-            with gr.Column(scale=5):
+            with gr.Column(scale=6, elem_classes="work-panel"):
+                gr.Markdown("### Documento", elem_classes="panel-title")
                 upload = gr.File(
                     label="Imagem ou PDF",
-                    file_types=["image", ".pdf"],
+                    file_types=[".png", ".jpg", ".jpeg", ".webp", ".bmp", ".pdf"],
                     type="filepath",
                 )
                 gr.Examples(
                     examples=[
                         [str(REPOSITORY_ROOT / "assets" / "baidu.png")],
                         [str(REPOSITORY_ROOT / "assets" / "Unlimited-OCR.png")],
+                        [str(REPOSITORY_ROOT / "Unlimited-OCR.pdf")],
                     ],
                     inputs=[upload],
                     label="Exemplos rápidos",
                 )
-                with gr.Accordion("Opções", open=False):
-                    page = gr.Number(label="Página do PDF", value=1, precision=0, minimum=1)
-                    dpi = gr.Slider(label="DPI do PDF", minimum=150, maximum=300, step=50, value=DEFAULT_DPI)
+                with gr.Row():
+                    page = gr.Number(
+                        label="Página do PDF",
+                        value=1,
+                        precision=0,
+                        minimum=1,
+                        maximum=1,
+                        interactive=False,
+                    )
+                    dpi = gr.Dropdown(
+                        label="Qualidade do PDF",
+                        choices=[150, 200, 250, 300],
+                        value=DEFAULT_DPI,
+                    )
+                preview_note = gr.Markdown(
+                    "Selecione uma imagem ou PDF para visualizar.",
+                    elem_classes="preview-note",
+                )
+                preview = gr.Image(
+                    label="Prévia da página selecionada",
+                    interactive=False,
+                    type="pil",
+                    height=480,
+                    format="png",
+                    buttons=["fullscreen"],
+                    elem_classes="preview-frame",
+                )
+                with gr.Accordion("Opções avançadas", open=False):
                     max_length = gr.Slider(
                         label="Limite de sequência",
                         minimum=2048,
@@ -373,17 +642,59 @@ def build_demo() -> Any:
                         step=1024,
                         value=DEFAULT_MAX_LENGTH,
                     )
-                run_button = gr.Button("Executar OCR na GPU", variant="primary", elem_classes="run-button")
-                unload_button = gr.Button("Liberar memória da GPU", variant="secondary")
+                with gr.Row():
+                    run_button = gr.Button(
+                        "Executar OCR na GPU",
+                        variant="primary",
+                        elem_classes="run-button",
+                    )
+                    unload_button = gr.Button(
+                        "Liberar GPU",
+                        variant="secondary",
+                    )
 
-            with gr.Column(scale=7):
+            with gr.Column(scale=6, elem_classes="work-panel"):
+                gr.Markdown("### Resultado", elem_classes="panel-title")
                 status = gr.Markdown("Aguardando um arquivo.")
                 with gr.Tabs():
                     with gr.Tab("Texto bruto"):
-                        raw = gr.Code(label=None, language=None, lines=22, elem_classes="result-code")
+                        raw = gr.Code(
+                            label=None,
+                            language=None,
+                            lines=24,
+                            elem_classes="result-code",
+                        )
                     with gr.Tab("JSON"):
-                        json_output = gr.JSON(label=None, height=480)
+                        json_output = gr.JSON(label=None, height=540)
                 json_download = gr.File(label="Baixar JSON")
+
+        upload.change(
+            fn=preview_new_upload,
+            inputs=[upload, dpi],
+            outputs=[preview, preview_note, page],
+            concurrency_limit=1,
+            concurrency_id="preview",
+            trigger_mode="always_last",
+            show_progress="minimal",
+        )
+        page.input(
+            fn=preview_document,
+            inputs=[upload, page, dpi],
+            outputs=[preview, preview_note],
+            concurrency_limit=1,
+            concurrency_id="preview",
+            trigger_mode="always_last",
+            show_progress="minimal",
+        )
+        dpi.input(
+            fn=preview_document,
+            inputs=[upload, page, dpi],
+            outputs=[preview, preview_note],
+            concurrency_limit=1,
+            concurrency_id="preview",
+            trigger_mode="always_last",
+            show_progress="minimal",
+        )
 
         run_button.click(
             fn=run_ocr,
@@ -410,7 +721,7 @@ if __name__ == "__main__":
         server_name="127.0.0.1",
         server_port=7860,
         share=False,
-        show_error=True,
+        show_error=False,
         max_file_size=MAX_UPLOAD_BYTES,
         allowed_paths=[str(OUTPUT_ROOT)],
         theme=gr.themes.Soft(primary_hue="lime", neutral_hue="slate"),

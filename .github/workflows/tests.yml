@@ -26,8 +26,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install lightweight test dependency
-        run: python -m pip install --disable-pip-version-check requests
+      - name: Install lightweight test dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          requests
+          Pillow==12.1.1
+          pymupdf==1.27.2.2
 
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
@@ -40,3 +44,4 @@ jobs:
           examples/parse_output_to_json.py
           examples/transformers_image_to_json.py
           examples/difficult_pdf_to_json.py
+          examples/gradio_cuda_app.py
