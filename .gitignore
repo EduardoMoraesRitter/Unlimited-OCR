@@ -38,6 +38,7 @@ htmlcov/
 
 # Local runtime outputs
 outputs/
+tmp/
 log/
 *.log
 *.raw.txt
