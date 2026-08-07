@@ -57,6 +57,8 @@
   per page, and aggregate JSON.
 - Runnable examples for offline conversion, single-image Transformers inference,
   and difficult PDFs.
+- A small localhost-only Gradio interface for image/PDF upload, live CUDA status,
+  raw model output, structured JSON, and explicit GPU-memory release.
 - Offline unit tests covering parsing, safety, temporary-file cleanup, output
   collisions, retry detection, and JSON-export failures.
 - GitHub Actions CI that runs the offline suite for every push and pull request,
@@ -70,6 +72,17 @@ Quick smoke test without downloading or running the OCR model:
 python examples/parse_output_to_json.py
 python -m unittest discover -s tests -v
 ```
+
+To use the actual model through a local web page after completing the CUDA
+setup in [`examples/README.md`](examples/README.md):
+
+```shell
+python -m pip install gradio==6.15.1 accelerate==1.14.0 huggingface-hub==0.36.0
+python examples/gradio_cuda_app.py
+```
+
+Then open <http://127.0.0.1:7860>. The server binds only to localhost and does
+not create a public Gradio share link.
 
 See [the complete change log](CHANGELOG.md), the
 [structured JSON guide](#structured-json-output), and the
@@ -86,8 +99,8 @@ evidence for the second layer only; it is not an OCR-accuracy benchmark.
 | JSON parser and validator | Local Python | No | 18 offline tests cover markers, pages, tables, coordinates, warnings, safe parsing, file handling, and runner failures. |
 | PDF rendering and page orchestration | Local Python | No for rendering; yes for the OCR step | Rendering, retry selection, cleanup, and error paths are covered offline with fixtures and mocks. |
 | Unlimited-OCR through the official Hugging Face Space | Hugging Face infrastructure | Not on the user's computer; the provider supplies the GPU | Used only for exploratory inference. This is not presented as a reproducible quality benchmark. |
-| Full local Unlimited-OCR inference | Local machine | Yes for the upstream Transformers path used here | Environment-dependent and intentionally excluded from CI. No completed local accuracy benchmark is currently published by this fork. |
-| Difficult/low-resolution PDF accuracy | Local or hosted GPU | Yes somewhere during model inference | The workflow exists, but measured CER/WER results have not yet been published. |
+| Full local Unlimited-OCR inference | Local machine | Yes for the upstream Transformers path used here | Manually smoke-tested on an RTX 4070 Laptop GPU through the local web UI; still excluded from CI and not an accuracy benchmark. |
+| Difficult/low-resolution PDF accuracy | Local or hosted GPU | Yes somewhere during model inference | One dense-form smoke test completed technically but produced repetitive/truncated text. Measured CER/WER results have not yet been published. |
 
 ### CUDA is an upstream runtime requirement
 
@@ -107,6 +120,22 @@ There are three materially different ways to use this repository:
 This fork does not claim a validated CPU fallback for the full model. See
 [`examples/README.md`](examples/README.md) for a CUDA verification command and
 the WSL/Linux setup used by the examples.
+
+### Local CUDA smoke-test evidence
+
+On 2026-08-06, the localhost web UI ran the pinned model revision
+`07dea832e22aefee32ad281d4b80551282e1c168` with PyTorch 2.10.0+cu129 on an
+NVIDIA GeForce RTX 4070 Laptop GPU. In `base` mode with `max_length=4096`, the
+included `assets/baidu.png` example returned `Baidu 百度`, produced valid schema
+1.0 JSON, took 92 seconds, and reported 6,835 MiB peak PyTorch CUDA allocation.
+
+A 200-DPI first page of the official
+[2025 IRS Form 1040](https://www.irs.gov/pub/irs-pdf/f1040.pdf) also completed
+locally in 388 seconds with a 7,039 MiB peak, but its output entered a repeated
+phrase loop and ended with an unclosed table. That run proves the CUDA pipeline
+executes; it does **not** prove acceptable OCR quality on dense forms. The web
+UI shows a review warning when it detects this kind of malformed or repetitive
+response.
 
 
 ## Release

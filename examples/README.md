@@ -79,7 +79,34 @@ Modos disponíveis:
 - `gundam`: visão global e recortes de 640 × 640; pode recuperar letras
   pequenas, mas usa mais VRAM e demora mais.
 
-## 3. PDF difícil, página por página
+## 3. Interface web local, estilo Hugging Face
+
+Depois de concluir a instalação CUDA da seção anterior, instale a combinação
+testada da interface sem alterar as versões do Transformers e do Pillow:
+
+```bash
+python -m pip install gradio==6.15.1 accelerate==1.14.0 huggingface-hub==0.36.0
+python examples/gradio_cuda_app.py
+```
+
+Abra `http://127.0.0.1:7860`. A tela aceita PNG, JPEG, WebP, BMP ou uma página
+selecionada de PDF, mostra a GPU CUDA detectada, preserva o texto bruto, exibe o
+JSON e oferece o arquivo `.json` para download. Há dois exemplos rápidos já
+incluídos no repositório.
+
+O modelo só é carregado no primeiro clique em **Executar OCR na GPU**. As
+requisições são serializadas e usam apenas o modo `base`, adequado ao limite de
+8 GB da RTX 4070 testada. A interface limita a sequência a 4.096, o upload a 25
+MB e a imagem renderizada a 25 milhões de pixels. O botão **Liberar memória da
+GPU** remove os pesos sem fechar a página. O servidor usa apenas `127.0.0.1` e
+`share=False`: ele não cria uma URL pública nem envia o documento para um
+Gradio Space.
+
+No teste local de 2026-08-06, `assets/baidu.png` retornou `Baidu 百度` em 92
+segundos, gerou JSON válido e atingiu pico de 6.835 MiB de alocação CUDA pelo
+PyTorch. Esse é um smoke test de integração, não uma medição de precisão.
+
+## 4. PDF difícil, página por página
 
 Este fluxo renderiza cada página a 300 DPI e mantém a concorrência fixa em 1.
 Assim, nenhuma página depende do contexto da anterior e o pico de memória fica
