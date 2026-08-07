@@ -64,7 +64,7 @@
 - Safer defaults for public development: generated OCR, model weights, local
   secrets, credentials, caches, and logs are excluded from Git.
 
-Quick smoke test without downloading the model:
+Quick smoke test without downloading or running the OCR model:
 
 ```shell
 python examples/parse_output_to_json.py
@@ -74,6 +74,39 @@ python -m unittest discover -s tests -v
 See [the complete change log](CHANGELOG.md), the
 [structured JSON guide](#structured-json-output), and the
 [Portuguese examples guide](examples/README.md).
+
+## Test status and what CUDA means
+
+The repository has two separate layers: Baidu's neural OCR model and this
+fork's deterministic post-processing/tooling. A passing offline test suite is
+evidence for the second layer only; it is not an OCR-accuracy benchmark.
+
+| Component | Where it runs | CUDA required? | Current validation status |
+| --- | --- | --- | --- |
+| JSON parser and validator | Local Python | No | 18 offline tests cover markers, pages, tables, coordinates, warnings, safe parsing, file handling, and runner failures. |
+| PDF rendering and page orchestration | Local Python | No for rendering; yes for the OCR step | Rendering, retry selection, cleanup, and error paths are covered offline with fixtures and mocks. |
+| Unlimited-OCR through the official Hugging Face Space | Hugging Face infrastructure | Not on the user's computer; the provider supplies the GPU | Used only for exploratory inference. This is not presented as a reproducible quality benchmark. |
+| Full local Unlimited-OCR inference | Local machine | Yes for the upstream Transformers path used here | Environment-dependent and intentionally excluded from CI. No completed local accuracy benchmark is currently published by this fork. |
+| Difficult/low-resolution PDF accuracy | Local or hosted GPU | Yes somewhere during model inference | The workflow exists, but measured CER/WER results have not yet been published. |
+
+### CUDA is an upstream runtime requirement
+
+CUDA was not added by this fork. The upstream Transformers example loads the
+model with `model.eval().cuda()`, so actual local OCR uses a compatible NVIDIA
+GPU, CUDA-enabled PyTorch, and the model weights. CUDA is not needed to render a
+PDF, parse a saved model response, create JSON, or run the offline test suite.
+
+There are three materially different ways to use this repository:
+
+| Workflow | Runs the OCR model? | File leaves the machine? | Practical consequence |
+| --- | --- | --- | --- |
+| Offline JSON conversion | No | No | Fast and CPU-only, but it requires a previously generated raw OCR response. |
+| Local Transformers inference | Yes, on the local NVIDIA GPU | No, after model/code download | Requires a working CUDA PyTorch environment; 8 GB GPUs are marginal. |
+| Hosted Hugging Face demo | Yes, on the provider's GPU | Yes | No local CUDA setup, but documents are uploaded to a third party and service limits apply. |
+
+This fork does not claim a validated CPU fallback for the full model. See
+[`examples/README.md`](examples/README.md) for a CUDA verification command and
+the WSL/Linux setup used by the examples.
 
 
 ## Release
@@ -89,6 +122,12 @@ See [the complete change log](CHANGELOG.md), the
 
 ### Transformers
 Inference using Huggingface transformers on NVIDIA GPUs. Requirements tested on python 3.12.3 + CUDA12.9：
+
+> [!IMPORTANT]
+> This section runs the actual OCR model and therefore differs from the
+> CPU-only JSON smoke test. Confirm that `torch.cuda.is_available()` is `True`
+> before downloading the model. The `.cuda()` call below comes from the
+> upstream inference path; it was not introduced by this fork.
 
 ```
 torch==2.10.0

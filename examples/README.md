@@ -37,26 +37,37 @@ py -3.12 -m unittest discover -s tests -v
 
 ## 2. Imagem única com Transformers
 
-Instale primeiro as dependências da seção Transformers do
-[`README.md`](../README.md). O ambiente validado pelo projeto usa Python 3.12,
-CUDA, PyTorch 2.10.0, Transformers 4.57.1 e Pillow 12.1.1.
+Esta etapa executa o modelo de OCR de verdade. Diferentemente do conversor da
+seção anterior, ela precisa dos pesos do modelo e de PyTorch com CUDA. Essa
+dependência vem do fluxo Transformers original do Unlimited-OCR, que chama
+`model.eval().cuda()`; não foi adicionada por este fork.
 
-PowerShell no Windows:
+O ambiente documentado usa Python 3.12, CUDA 12.9, PyTorch 2.10.0,
+Transformers 4.57.1 e Pillow 12.1.1. Para reproduzir exatamente essa pilha em
+uma máquina Windows com NVIDIA, use Ubuntu no WSL2. Na validação deste guia, o
+índice CUDA 12.9 do PyTorch oferecia os wheels 2.10.0 para Linux, mas não para
+Windows nativo; instalar apenas `torch==2.10.0` pelo PyPI no Windows resultava
+na edição CPU, incompatível com estes exemplos.
 
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install torch==2.10.0 torchvision==0.25.0 transformers==4.57.1 Pillow==12.1.1 matplotlib==3.10.8 einops==0.8.2 addict==2.4.0 easydict==1.13 pymupdf==1.27.2.2 psutil==7.2.2
-.\.venv\Scripts\python.exe examples\transformers_image_to_json.py C:\docs\pagina.png --mode base --max-length 8192
-```
-
-WSL/Linux:
+WSL2/Linux:
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-python -m pip install torch==2.10.0 torchvision==0.25.0 transformers==4.57.1 Pillow==12.1.1 matplotlib==3.10.8 einops==0.8.2 addict==2.4.0 easydict==1.13 pymupdf==1.27.2.2 psutil==7.2.2
+python -m pip install --upgrade pip
+python -m pip install torch==2.10.0 torchvision==0.25.0 \
+  --index-url https://download.pytorch.org/whl/cu129
+python -m pip install transformers==4.57.1 Pillow==12.1.1 \
+  matplotlib==3.10.8 einops==0.8.2 addict==2.4.0 \
+  easydict==1.13 pymupdf==1.27.2.2 psutil==7.2.2
+python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
 python examples/transformers_image_to_json.py /mnt/c/docs/pagina.png --mode base --max-length 8192
 ```
+
+A verificação precisa terminar com `True`. Se mostrar `False`, não prossiga com
+o download dos pesos: o Python está usando uma edição sem CUDA. O Windows nativo
+continua adequado para o conversor JSON e para os 18 testes offline, que não
+carregam o modelo.
 
 O script chama `model.infer(..., eval_mode=True)`. Por padrão, grava
 `outputs/pagina.raw.txt` e `outputs/pagina.json`. Use `--output` e
@@ -127,3 +138,6 @@ de linha de comando podem ficar no histórico do terminal.
 - 300 DPI ajuda com texto pequeno, mas não corrige sozinho desfoque, páginas
   tortas, sombras ou escrita manual. Faça pré-processamento e valide nomes,
   valores, tabelas e fórmulas antes de usar o resultado em produção.
+- Os 18 testes offline validam o parser e os controles do fluxo com respostas
+  salvas, fixtures e mocks. Eles não executam o modelo, não medem a precisão do
+  OCR e não comprovam desempenho em PDFs difíceis.
