@@ -53,6 +53,8 @@ Baidu under the repository's MIT license.
 - Added runner tests for distinct output names, nested output directories,
   managed PDF temporary files, automatic retry warnings, and JSON failure status.
 - The validation suite contains 18 tests and can run without model weights.
+- Added GitHub Actions CI for pushes and pull requests using read-only
+  permissions and commit-pinned official actions.
 - Expanded `.gitignore` coverage for `.env` files, credentials, generated OCR,
   logs, caches, checkpoints, and model weights.
 

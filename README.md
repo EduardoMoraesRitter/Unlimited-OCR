@@ -27,6 +27,12 @@
   </a>
 </div>
 
+<div align="center">
+  <a href="https://github.com/EduardoMoraesRitter/Unlimited-OCR/actions/workflows/tests.yml">
+    <img alt="Offline tests" src="https://github.com/EduardoMoraesRitter/Unlimited-OCR/actions/workflows/tests.yml/badge.svg" />
+  </a>
+</div>
+
 <h3 align="center">Welcome the Era of One-shot Long-horizon Parsing.</h3>
 
 <p align="center">
@@ -53,6 +59,8 @@
   and difficult PDFs.
 - Offline unit tests covering parsing, safety, temporary-file cleanup, output
   collisions, retry detection, and JSON-export failures.
+- GitHub Actions CI that runs the offline suite for every push and pull request,
+  with read-only repository permissions and commit-pinned actions.
 - Safer defaults for public development: generated OCR, model weights, local
   secrets, credentials, caches, and logs are excluded from Git.
 
